@@ -1,0 +1,247 @@
+---
+title: "Umbizo Seurat object"
+author: "Jimena Roces"
+date: "2026-07-17"
+output: html_document
+---
+```{r}
+library(data.table)
+library(Seurat)
+library(dplyr)
+```
+
+
+```{r}
+#Loading raw data:
+
+mesmer.fp <- "NSCLC.0--mesmer_cell.csv"
+
+main.matrix <- data.frame(fread(mesmer.fp), check.names = FALSE)
+
+main.matrix[, "CellID"] <- paste0("CellID_", main.matrix[, "CellID"])
+rownames(main.matrix) <- main.matrix[, "CellID"]
+
+quant.matrix <- main.matrix[, 2:(grep("X_centroid", fixed = TRUE, colnames(main.matrix)) - 1)]
+rownames(quant.matrix) <- main.matrix[, "CellID"]
+quant.matrix <- t(quant.matrix)
+
+centroid.matrix <- main.matrix[, c("X_centroid", "Y_centroid", "CellID")]
+colnames(centroid.matrix) <- c("x", "y", "cell")
+
+meta.matrix <- main.matrix[, colnames(main.matrix)[c(1, grep("Area", colnames(main.matrix), fixed = TRUE):ncol(main.matrix))]]
+colnames(meta.matrix)[1] <- "cell_id"
+
+data.list <- list(matrix = quant.matrix, centroids = centroid.matrix, metadata = meta.matrix)
+
+coords <- suppressWarnings(CreateFOV(coords = data.list$centroids, type = "centroids", key = "fov", assay = "Akoya"))
+colnames(data.list$metadata) <- suppressWarnings(make.names(colnames(data.list$metadata)))
+
+obj <- CreateSeuratObject(counts = data.list$matrix, assay = "Akoya", meta.data = data.list$metadata)
+coords <- subset(coords, cells = Cells(obj))
+suppressWarnings(obj[["fov"]] <- coords)
+
+codex.obj <- obj
+codex.obj <- NormalizeData(codex.obj, normalization.method = "CLR", margin = 2)
+codex.obj <- ScaleData(codex.obj)
+
+
+#2 splitting marker panel
+
+marker_cols <- rownames(codex.obj)
+marker_cols <- setdiff(marker_cols, "Keratin_14")  
+
+set.seed(0)
+n_markers <- length(marker_cols)
+shuffled_markers <- sample(marker_cols, n_markers)
+
+clustering_markers <- shuffled_markers[1:floor(n_markers / 2)]
+validation_markers  <- shuffled_markers[(floor(n_markers / 2) + 1):n_markers]
+
+cat("Clustering markers (", length(clustering_markers), "):\n")
+print(clustering_markers)
+
+cat("\nValidation markers (", length(validation_markers), "):\n")
+print(validation_markers)
+
+
+# 3 Cluster using clustering markers only
+
+VariableFeatures(codex.obj) <- clustering_markers
+
+codex.obj <- RunPCA(
+  object = codex.obj,
+  features = clustering_markers,
+  npcs = 20,
+  reduction.name = "pca_cluster",
+  reduction.key = "PCclust_",
+  verbose = FALSE
+)
+
+codex.obj <- FindNeighbors(codex.obj, reduction = "pca_cluster", dims = 1:20, verbose = FALSE)
+codex.obj <- FindClusters(codex.obj, resolution = 0.4, n.start = 1, random.seed = 0, verbose = FALSE)
+
+codex.obj <- RunUMAP(codex.obj, reduction = "pca_cluster", dims = 1:20, seed.use = 0, verbose = FALSE)
+
+cat("\nCluster counts:\n")
+print(table(Idents(codex.obj)))
+
+
+# 4 Separate PCA using only validation markers
+
+n_val_pcs <- min(20, length(validation_markers) - 1)
+
+codex.obj <- ScaleData(codex.obj, features = validation_markers)
+
+codex.obj <- RunPCA(
+  object = codex.obj,
+  features = validation_markers,
+  npcs = n_val_pcs,
+  reduction.name = "pca_validation",
+  reduction.key = "PCval_",
+  verbose = FALSE
+)
+
+#Save all for python use
+
+clustering_pca_embeddings <- Embeddings(codex.obj, reduction = "pca_cluster")
+write.csv(clustering_pca_embeddings, "pca_embeddings_clustering_new.csv", row.names = TRUE)
+
+validation_pca_embeddings <- Embeddings(codex.obj, reduction = "pca_validation")
+write.csv(validation_pca_embeddings, "pca_embeddings_validation.csv", row.names = TRUE)
+
+clusters <- data.frame(
+  CellID = Cells(codex.obj),
+  cluster = as.character(Idents(codex.obj))
+)
+write.csv(clusters, "clusters_new_new.csv", row.names = FALSE)
+
+saveRDS(codex.obj, "codex_split_feature_new.rds")
+
+cat("\nSaved: pca_embeddings_clustering_new.csv, pca_embeddings_validation.csv, clusters_new_new.csv\n")
+```
+
+```{r}
+library(data.table)
+library(Seurat)
+library(dplyr)
+
+# 1 Loading Raw data and building Seurat object
+
+mesmer.fp <- "NSCLC.0--mesmer_cell.csv"
+
+main.matrix <- data.frame(fread(mesmer.fp), check.names = FALSE)
+main.matrix[, "CellID"] <- paste0("CellID_", main.matrix[, "CellID"])
+rownames(main.matrix) <- main.matrix[, "CellID"]
+
+quant.matrix <- main.matrix[, 2:(grep("X_centroid", fixed = TRUE, colnames(main.matrix)) - 1)]
+rownames(quant.matrix) <- main.matrix[, "CellID"]
+quant.matrix <- t(quant.matrix)   # markers = rows, cells = columns
+
+centroid.matrix <- main.matrix[, c("X_centroid", "Y_centroid", "CellID")]
+colnames(centroid.matrix) <- c("x", "y", "cell")
+
+meta.matrix <- main.matrix[, colnames(main.matrix)[c(1, grep("Area", colnames(main.matrix), fixed = TRUE):ncol(main.matrix))]]
+colnames(meta.matrix)[1] <- "cell_id"
+
+coords <- suppressWarnings(CreateFOV(coords = centroid.matrix, type = "centroids", key = "fov", assay = "Akoya"))
+colnames(meta.matrix) <- suppressWarnings(make.names(colnames(meta.matrix)))
+
+codex.obj <- CreateSeuratObject(counts = quant.matrix, assay = "Akoya", meta.data = meta.matrix)
+coords <- subset(coords, cells = Cells(codex.obj))
+suppressWarnings(codex.obj[["fov"]] <- coords)
+
+codex.obj <- NormalizeData(codex.obj, normalization.method = "CLR", margin = 2)
+codex.obj <- ScaleData(codex.obj)
+
+# Ranking markers by row-wise variance across cells
+
+expr_matrix <- GetAssayData(codex.obj, assay = "Akoya", layer = "data") 
+
+marker_cols <- setdiff(rownames(codex.obj), "Keratin-14")  
+
+marker_variance <- apply(expr_matrix[marker_cols, ], 1, var, na.rm = TRUE)
+marker_variance_sorted <- sort(marker_variance, decreasing = TRUE)
+
+top_most_variable <- names(marker_variance_sorted)[1:30]
+bottom_least_variable <- names(marker_variance_sorted)[
+  (length(marker_variance_sorted) - 29):length(marker_variance_sorted)
+]
+n_split<-30
+cat("Top", n_split, "most variable markers:\n")
+print(top_most_variable)
+
+cat("\nBottom", n_split, "least variable markers:\n")
+print(bottom_least_variable)
+
+write.csv(
+  data.frame(marker = names(marker_variance_sorted), variance = marker_variance_sorted),
+  "marker_variance_ranking.csv",
+  row.names = FALSE
+)
+```
+
+
+```{r}
+#Obtain two different sets of validation and cluster data: 
+# Round 1: cluster on LEAST variable, validate on MOST variable
+
+set.seed(0)
+
+run1 <- codex.obj
+
+VariableFeatures(run1) <- bottom_least_variable
+run1 <- RunPCA(run1, features = bottom_least_variable, npcs = 20,
+               reduction.name = "pca_cluster", reduction.key = "PCclust_", verbose = FALSE)
+run1 <- FindNeighbors(run1, reduction = "pca_cluster", dims = 1:20, verbose = FALSE)
+run1 <- FindClusters(run1, resolution = 0.4, n.start = 1, random.seed = 0, verbose = FALSE)
+
+run1 <- ScaleData(run1, features = top_most_variable)
+run1 <- RunPCA(run1, features = top_most_variable, npcs = 20,
+               reduction.name = "pca_validation", reduction.key = "PCval_", verbose = FALSE)
+
+write.csv(Embeddings(run1, "pca_validation"), "round1_pca_validation.csv", row.names = TRUE)
+write.csv(
+  data.frame(CellID = Cells(run1), cluster = as.character(Idents(run1))),
+  "round1_clusters.csv", row.names = FALSE
+)
+
+cat("\nRound 1 cluster counts:\n")
+print(table(Idents(run1)))
+
+
+#Round 2: cluster on MOST variable, validate on LEAST variable
+
+set.seed(0)
+
+run2 <- codex.obj
+
+VariableFeatures(run2) <- top_most_variable
+run2 <- RunPCA(run2, features = top_most_variable, npcs = 20,
+               reduction.name = "pca_cluster", reduction.key = "PCclust_", verbose = FALSE)
+run2 <- FindNeighbors(run2, reduction = "pca_cluster", dims = 1:20, verbose = FALSE)
+run2 <- FindClusters(run2, resolution = 0.4, n.start = 1, random.seed = 0, verbose = FALSE)
+
+run2 <- ScaleData(run2, features = bottom_least_variable)
+run2 <- RunPCA(run2, features = bottom_least_variable, npcs = 20,
+               reduction.name = "pca_validation", reduction.key = "PCval_", verbose = FALSE)
+
+write.csv(Embeddings(run2, "pca_validation"), "round2_pca_validation.csv", row.names = TRUE)
+write.csv(
+  data.frame(CellID = Cells(run2), cluster = as.character(Idents(run2))),
+  "round2_clusters.csv", row.names = FALSE
+)
+
+cat("\nRound 2 cluster counts:\n")
+print(table(Idents(run2)))
+
+cat("\nDone. Add these 4 files to Python: round1_pca_validation.csv, round1_clusters.csv, round2_pca_validation.csv, round2_clusters.csv\n")
+```
+
+```{r}
+cat("Missing values in bottom_least_variable columns:\n")
+print(colSums(is.na(t(expr_matrix[bottom_least_variable, ]))))
+
+cat("\nMissing values in top_most_variable columns:\n")
+print(colSums(is.na(t(expr_matrix[top_most_variable, ]))))
+```
+
